@@ -592,6 +592,17 @@ async function fetchUserDB(uid){
   return { obj:core, legacy:false, cache };
 }
 async function persistDB(uid, obj, cache){
+  const full = JSON.stringify(obj);
+  if(new TextEncoder().encode(full).length < 850000){
+    // Normal school: ONE document, exactly like the original app (works with any Firestore rules).
+    const old = Object.keys(cache).filter(id=>id.indexOf('__')!==0);
+    if(cache.__main !== 'L|'+full){ await fsSetDoc(userDocRef(uid), JSON.parse(full)); }
+    for(let i=0;i<old.length;i+=400){
+      const bt = fsWriteBatch(dbFs); old.slice(i,i+400).forEach(id=>bt.delete(fsdoc(dbFs,'users',uid,'parts',id))); await bt.commit();
+    }
+    Object.keys(cache).forEach(k=>delete cache[k]); cache.__main = 'L|'+full; return;
+  }
+  // Very large school (1000+ students with many fee records): split across several documents.
   const { core, parts, counts } = buildParts(obj);
   const ops = [];
   Object.keys(parts).forEach(id=>{ if(cache[id] !== parts[id]) ops.push({set:id}); });
@@ -614,7 +625,7 @@ async function loadDBFromCloud(uid){
   const r = await fetchUserDB(uid);
   if(r){
     db = r.obj; lastSaved = r.cache; migrateDB();
-    if(r.legacy){ await persistDB(uid, db, lastSaved); }     // upgrade old data automatically
+    if(r.legacy){ lastSaved = { __main: 'L|'+JSON.stringify(db) }; }
     return;
   }
   lastSaved = {};
@@ -968,7 +979,7 @@ async function fetchUsersDirectory(){
 function isValidEmail(email){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); }
 function passwordStrengthOK(pass){ return !!pass && pass.length>=6; }
 function currentUserRecord(){ return directoryCache; }
-function isSuperAdmin(){ return !!(directoryCache && directoryCache.role === 'admin'); }
+function isSuperAdmin(){ return !!(directoryCache && (directoryCache.role === 'admin' || isOwnerEmail(directoryCache.email))); }
 function freshUserDB(email, name){
   return {
     admin:{email, password:'', name: name || (email.split('@')[0])},
@@ -1055,13 +1066,22 @@ async function ensureDirectoryEntry(fbUser){
     await fsSetDoc(ref, entry);
     snap = await fsGetDoc(ref);
   }
-  return Object.assign({uid: fbUser.uid}, snap.data());
+  const d = Object.assign({uid: fbUser.uid}, snap.data());
+  if(isOwnerEmail(d.email || fbUser.email) && (d.role !== 'admin' || d.approved !== true)){
+    d.role = 'admin'; d.approved = true;
+    try{ await fsSetDoc(ref, { role:'admin', approved:true }, { merge:true }); }
+    catch(e){ console.warn('Could not repair owner entry in the cloud (the app still treats you as admin)', e); }
+  }
+  return d;
 }
 
 /* Called once Firebase Auth confirms a signed-in user — fresh sign-in,
    fresh sign-up, Google sign-in, or an existing cloud session restored
    automatically (works on any device/browser, not just this one). */
-function isApprovedEntry(d){ return !!d && (d.approved === true || d.role === 'admin'); }
+/* The owner's own login is ALWAYS admin + approved, whatever the directory entry says. */
+const OWNER_EMAILS = ['shahzaibarshad8688@gmail.com'];
+function isOwnerEmail(e){ return !!e && OWNER_EMAILS.includes(String(e).trim().toLowerCase()); }
+function isApprovedEntry(d){ return !!d && (d.approved === true || d.role === 'admin' || isOwnerEmail(d.email)); }
 async function denyAccess(){
   try{ await fbSignOut(auth); }catch(e){}
   currentUid = null; directoryCache = null;
@@ -2796,7 +2816,7 @@ async function init(){
         await loginAsUser(fbUser);
       }catch(e){
         console.error('Failed to load account from the cloud', e);
-        toast('Could not load your account from the cloud. Please check your connection.', 'error');
+        toast((e && (e.code==='permission-denied' || /permission/i.test(e.message||''))) ? 'Permission denied by Firestore rules — publish the new firestore.rules file in Firebase Console.' : 'Could not load your account from the cloud. Please check your connection.', 'error');
         document.getElementById('login-screen').style.display='flex';
       }
     } else {
