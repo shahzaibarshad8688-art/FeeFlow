@@ -2648,17 +2648,33 @@ function saveMyBranding(){
 }
 
 /* ================================================================
-   BULK IMPORT WIZARD (Excel .xlsx/.xls, CSV, or paste from Google Sheets)
+   BULK IMPORT WIZARD v2 — students + classes + FEE STATUS
+   Sources: Excel (.xlsx/.xls, every sheet), CSV, paste from Google Sheets, or a Google Sheet link.
    ================================================================ */
 const IMP_FIELDS={
-  name:['name','studentname','student','fullname'], fatherName:['fathername','father','fathersname','guardianname'],
-  motherName:['mothername','mother'], cls:['class','classname','grade'], section:['section','sec'],
-  roll:['roll','rollno','rollnumber','regno','registrationno'], fee:['monthlyfee','fee','fees','monthly'],
-  phone:['phone','phonenumber','mobile','contact'], guardianNumber:['guardiannumber','guardianphone','guardianno','parentphone'],
-  cnic:['cnic','bform','cnicbform'], address:['address'], admissionDate:['admissiondate','doa','dateofadmission'], status:['status']
+  name:['name','studentname','student','fullname','childname','pupilname'],
+  fatherName:['fathername','father','fathersname','guardianname'],
+  motherName:['mothername','mother'],
+  cls:['class','classname','grade','std','standard'],
+  section:['section','sec'],
+  roll:['roll','rollno','rollnumber','regno','registrationno','grno'],
+  fee:['monthlyfee','fee','fees','monthly','tuitionfee','tuition'],
+  phone:['phone','phonenumber','mobile','contact'],
+  guardianNumber:['guardiannumber','guardianphone','guardianno','parentphone','fatherphone','fathercontact'],
+  cnic:['cnic','bform','cnicbform'], address:['address'],
+  admissionDate:['admissiondate','doa','dateofadmission'],
+  status:['status'],
+  feeStatus:['feestatus','paymentstatus','paidstatus'],
+  paidAmt:['paidamount','amountpaid','paid','received','amountreceived'],
+  paidMonths:['paidmonths','monthspaid','feepaidmonths','paidfor'],
+  payDate:['paymentdate','paiddate','dateofpayment'],
+  payMethod:['paymentmethod','paymode','method'],
+  receipt:['receiptno','receipt','receiptnumber']
 };
-let _imp={items:[],opt:{autoCls:true,skipDup:true,fees:true,from:new Date().getMonth(),defFee:2000}};
+let _imp={items:[],opt:{autoCls:true,skipDup:true,updFees:true,fees:true,from:new Date().getMonth(),payMonth:new Date().getMonth(),to:new Date().getMonth(),defFee:2000}};
 const normH=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+const MON3=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+const MON_RE='(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
 
 function parseDelimited(text){
   text=text.replace(/^\uFEFF/,''); const d=(text.split(/\r?\n/)[0]||'').includes('\t')?'\t':',';
@@ -2679,24 +2695,76 @@ function impDate(v){
   m=v.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/); if(m){let y=+m[3]; if(y<100)y+=2000; return y+'-'+pad(+m[2])+'-'+pad(+m[1]);}
   return todayStr();
 }
+/* month column headers: Jan, January, Jan 2026, Jan-26, March Fee, Fee Mar ... */
+function impMonthHeader(raw){
+  const m=String(raw||'').trim().toLowerCase().match(new RegExp('^(?:fees?[\\s\\-_:]*)?'+MON_RE+'(?:[\\s\\-_/\']*(?:fees?|paid|status))?[\\s\\-_/\',]*((?:19|20)?\\d{2})?$'));
+  if(!m) return null; let y=m[2]?+m[2]:null; if(y!==null&&y<100) y+=2000;
+  return {m:MON3.indexOf(m[1].slice(0,3)),y};
+}
+/* one fee cell -> {st:'paid'|'partial'|'unpaid', amt} ; blank -> null */
+function impCell(v,fee){
+  const s=String(v==null?'':v).trim().toLowerCase();
+  if(s==='') return null;
+  if(/^(paid|p|yes|y|done|clear|cleared|received|ok|true|1|✓|✔|√)$/.test(s)) return {st:'paid',amt:fee};
+  if(/^(unpaid|u|no|n|due|pending|false|0|-|–|x|×|✗|✘)$/.test(s)) return {st:'unpaid',amt:0};
+  if(/^(partial|part|half)$/.test(s)) return {st:'partial',amt:null};
+  if(/\d/.test(s)){ const n=Number(s.replace(/[^\d.]/g,'')); if(!isNaN(n)){ if(n<=0) return {st:'unpaid',amt:0}; return (fee<=0||n>=fee)?{st:'paid',amt:n}:{st:'partial',amt:n}; } }
+  return {st:'unpaid',amt:0};
+}
+/* "Jan, Feb, Mar" / "Jan-Mar" / "January to March" */
+function impParseMonths(text){
+  const out=[]; const re=new RegExp(MON_RE+'[a-z]*(?:\\s*(?:-|–|to)\\s*'+MON_RE+'[a-z]*)?','g'); const t=String(text||'').toLowerCase(); let m;
+  while((m=re.exec(t))){
+    const a=MON3.indexOf(m[1].slice(0,3));
+    if(m[2]){ const b=MON3.indexOf(m[2].slice(0,3)); for(let i=a,k=0;k<13;i=(i+1)%12,k++){ out.push(i); if(i===b) break; } }
+    else out.push(a);
+  }
+  return [...new Set(out)];
+}
+/* every fee fact found for this row -> [{y,m,st,amt}] */
+function impFeeEvents(it,fee,o){
+  const now=new Date(), y0=now.getFullYear(), cm=now.getMonth(); const map=new Map();
+  const put=(y,m,r)=>{ if(r) map.set(y+'-'+m,{y,m,st:r.st,amt:r.amt}); };
+  it.cells.forEach(c=>put(c.y||y0,c.m,impCell(c.v,fee)));
+  it.paidMonths.forEach(m=>put(y0,m,{st:'paid',amt:fee}));
+  if(it.feeStatus||it.paidAmt){
+    let r=it.feeStatus?impCell(it.feeStatus,fee):null;
+    if(/\d/.test(it.paidAmt||'')){
+      const n=Number(String(it.paidAmt).replace(/[^\d.]/g,''))||0;
+      if(n>0&&(!r||r.st!=='unpaid')) r=(fee<=0||n>=fee)?{st:'paid',amt:n}:{st:'partial',amt:n};
+      else if(n<=0&&!r) r={st:'unpaid',amt:0};
+    } else if(!r&&it.paidAmt) r=impCell(it.paidAmt,fee);
+    put(y0,o.payMonth==null?cm:o.payMonth,r);
+  }
+  return [...map.values()];
+}
+function impResolveFee(it){
+  const ex=it.existingId&&db.students.find(s=>s.id===it.existingId);
+  const c=db.classes.find(c=>c.name.toLowerCase()===it.cls.toLowerCase());
+  return it.fee||(ex&&ex.monthlyFee)||(c&&c.fee)||_imp.opt.defFee||0;
+}
+
 function openImportWizard(){
   openModal(`
     <div class="modal-head"><h3>Import Students — Bulk Wizard</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    <div class="text-muted" style="font-size:12.5px; margin-bottom:14px;">Upload an Excel / CSV file, or copy rows from Google Sheets and paste them below. First row must be the column headings. Works for 1 or 1000+ students.</div>
+    <div class="text-muted" style="font-size:12.5px; margin-bottom:12px;">Import students, classes <b>and fee status</b> in one go — 1 or 1000+ students. First row = column headings. Put months (Jan, Feb, Mar …) as columns with <b>Paid / Unpaid / Partial</b> or the amount paid, and their fee status is imported too. In an Excel file with several sheets, each sheet name becomes the class.</div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
       <button class="btn btn-ghost btn-sm" onclick="downloadImportTemplate()">⬇ Download Template</button>
       <input type="file" id="imp-file" accept=".xlsx,.xls,.csv,.tsv,.txt" style="display:none;" onchange="impFile(this.files[0])">
       <button class="btn btn-primary btn-sm" onclick="document.getElementById('imp-file').click()">Choose Excel / CSV File</button>
     </div>
-    <div class="field"><label>…or paste from Google Sheets / Excel</label><textarea id="imp-paste" rows="7" placeholder="Name&#9;Father Name&#9;Class&#9;Roll&#9;Monthly Fee&#9;Phone&#10;Ali Khan&#9;Ahmed Khan&#9;Class 5&#9;1&#9;3000&#9;0300-1234567"></textarea></div>
+    <div class="field"><label>Google Sheet link (sharing must be “Anyone with the link — Viewer”)</label>
+      <div style="display:flex; gap:8px;"><input type="text" id="imp-gs" placeholder="https://docs.google.com/spreadsheets/d/..."><button class="btn btn-ghost btn-sm" style="white-space:nowrap;" onclick="impGoogleSheet()">Import from Link</button></div></div>
+    <div class="field"><label>…or copy rows from Google Sheets / Excel and paste here</label><textarea id="imp-paste" rows="6" placeholder="Name&#9;Father Name&#9;Class&#9;Monthly Fee&#9;Jan&#9;Feb&#9;Mar&#10;Ali Khan&#9;Ahmed Khan&#9;Class 5&#9;3000&#9;Paid&#9;Paid&#9;Unpaid"></textarea></div>
     <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="impBuild(parseDelimited(document.getElementById('imp-paste').value))">Read Pasted Data</button></div>
   `,true);
 }
 function downloadImportTemplate(){
+  const m=MONTHS_SHORT;
   downloadCSV('students_import_template.csv',
-    ['Name','Father Name','Mother Name','Class','Section','Roll','Monthly Fee','Phone','Guardian Phone','CNIC','Address','Admission Date','Status'],
-    [['Ali Khan','Ahmed Khan','Mrs. Khan','Class 5','A','1','3000','0300-1234567','0321-7654321','35201-1234567-1','Street 1, Multan','2025-04-01','active'],
-     ['Sara Malik','Bilal Malik','','Class 5','A','2','3000','0301-1111111','','','','01/04/2025','active']]);
+    ['Name','Father Name','Mother Name','Class','Section','Roll','Monthly Fee','Phone','Guardian Phone','CNIC','Address','Admission Date',...m],
+    [['Ali Khan','Ahmed Khan','Mrs. Khan','Class 5','A','1','3000','0300-1234567','0321-7654321','35201-1234567-1','Street 1, Multan','2025-04-01','Paid','Paid','Paid','Paid','Paid','Paid','Paid','Paid','Paid','Unpaid','',''],
+     ['Sara Malik','Bilal Malik','','Class 5','A','2','3000','0301-1111111','','','','01/04/2025','Paid','Paid','Partial','Paid','1500','Paid','Paid','Unpaid','Unpaid','Unpaid','','']]);
 }
 function impLoadXlsx(cb){
   if(window.XLSX) return cb();
@@ -2708,94 +2776,165 @@ function impFile(f){
   if(['csv','tsv','txt'].includes(ext)){ r.onload=e=>impBuild(parseDelimited(String(e.target.result))); r.readAsText(f); }
   else impLoadXlsx(()=>{
     r.onload=e=>{ try{
-      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true}); const ws=wb.Sheets[wb.SheetNames[0]];
-      const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,dateNF:'yyyy-mm-dd',defval:''});
-      impBuild(rows.filter(r=>r.some(x=>String(x).trim()!=='')));
-    }catch(err){ toast('Could not read this file','error'); } };
+      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
+      const blocks=wb.SheetNames.map(n=>({name:n,rows:XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:false,dateNF:'yyyy-mm-dd',defval:''}).filter(r=>r.some(x=>String(x).trim()!==''))})).filter(b=>b.rows.length>1);
+      impBuildBlocks(blocks);
+    }catch(err){ console.error(err); toast('Could not read this file','error'); } };
     r.readAsArrayBuffer(f);
   });
 }
-function impBuild(rows){
-  if(!rows||rows.length<2){toast('No data rows found. First row must be headings.','error');return;}
-  const hdr=rows[0].map(normH); const idx={};
-  Object.keys(IMP_FIELDS).forEach(k=>{idx[k]=hdr.findIndex(h=>IMP_FIELDS[k].includes(h));});
-  if(idx.name<0){toast('Column "Name" not found in the first row','error');return;}
-  const g=(r,k)=>idx[k]>=0?String(r[idx[k]]??'').trim():'';
-  const existing=new Set(db.students.map(s=>(s.name+'|'+(s.fatherName||'')+'|'+s.classId).toLowerCase()));
-  const seen=new Set();
-  _imp.items=rows.slice(1).map((r,i)=>{
-    const it={n:i+2,name:g(r,'name'),fatherName:g(r,'fatherName'),motherName:g(r,'motherName'),cls:g(r,'cls'),section:g(r,'section')||'A',
+async function impGoogleSheet(){
+  const url=(document.getElementById('imp-gs').value||'').trim();
+  const m=url.match(/\/spreadsheets\/d\/([a-zA-Z0-9\-_]+)/);
+  if(!m){ toast('Please paste a valid Google Sheet link','error'); return; }
+  const gid=(url.match(/[#&?]gid=(\d+)/)||[])[1];
+  try{
+    const r=await fetch('https://docs.google.com/spreadsheets/d/'+m[1]+'/gviz/tq?tqx=out:csv'+(gid?'&gid='+gid:''));
+    const t=await r.text();
+    if(!r.ok||/^\s*<(!doctype|html)/i.test(t)) throw new Error('not public');
+    impBuild(parseDelimited(t));
+  }catch(e){ toast('Could not read this Google Sheet. Set sharing to “Anyone with the link — Viewer”, or use File → Download → Excel/CSV and upload that file here.','error'); }
+}
+
+function impParseBlock(rows,sheetName,multi,existingMap,seen){
+  let h=-1; for(let i=0;i<Math.min(rows.length,15);i++){ if(rows[i].some(c=>IMP_FIELDS.name.includes(normH(c)))){h=i;break;} }
+  if(h<0) return {err:'Column "Name" not found'+(sheetName?' in sheet "'+sheetName+'"':'')};
+  const rawH=rows[h].map(c=>String(c==null?'':c).trim()); const hdr=rawH.map(normH); const idx={};
+  Object.keys(IMP_FIELDS).forEach(k=>{idx[k]=hdr.findIndex(x=>IMP_FIELDS[k].includes(x));});
+  const monthCols=[]; rawH.forEach((c,i)=>{ const mh=impMonthHeader(c); if(mh) monthCols.push({i,m:mh.m,y:mh.y}); });
+  const g=(r,k)=>idx[k]>=0?String(r[idx[k]]==null?'':r[idx[k]]).trim():'';
+  const sheetCls=(multi&&sheetName&&!/^(sheet|page|worksheet)\s*\d*$/i.test(sheetName))?sheetName:'';
+  const now=new Date(), y0=now.getFullYear(); let minM=null,maxM=null;
+  monthCols.forEach(c=>{ if((c.y||y0)===y0){ minM=minM===null?c.m:Math.min(minM,c.m); maxM=maxM===null?c.m:Math.max(maxM,c.m); } });
+  const items=rows.slice(h+1).map((r,n)=>{
+    const it={n:h+2+n,name:g(r,'name'),fatherName:g(r,'fatherName'),motherName:g(r,'motherName'),cls:g(r,'cls')||sheetCls,section:g(r,'section')||'A',
       roll:g(r,'roll'),fee:Number(g(r,'fee').replace(/[^\d.]/g,''))||0,phone:g(r,'phone'),guardianNumber:g(r,'guardianNumber'),
       cnic:g(r,'cnic'),address:g(r,'address'),admissionDate:impDate(g(r,'admissionDate')),
-      status:/^inactive$/i.test(g(r,'status'))?'inactive':'active'};
+      status:/^inactive$/i.test(g(r,'status'))?'inactive':'active',
+      cells:monthCols.map(c=>({m:c.m,y:c.y,v:r[c.i]==null?'':String(r[c.i])})),
+      paidMonths:impParseMonths(g(r,'paidMonths')),feeStatus:g(r,'feeStatus'),paidAmt:g(r,'paidAmt'),
+      payDate:g(r,'payDate'),payMethod:g(r,'payMethod'),receipt:g(r,'receipt')};
     const c=db.classes.find(c=>c.name.toLowerCase()===it.cls.toLowerCase()); it.newCls=!c;
     const key=(it.name+'|'+it.fatherName+'|'+(c?c.id:it.cls)).toLowerCase();
-    it.dup=!!it.name&&(existing.has(key)||seen.has(key)); seen.add(key);
+    it.existingId=existingMap.get(key)||null;
+    it.dup=!!it.name&&(!!it.existingId||seen.has(key)); seen.add(key);
     return it;
   });
-  impShowPreview();
+  return {items,minM,maxM};
 }
+function impBuildBlocks(blocks){
+  const existingMap=new Map(); db.students.forEach(s=>existingMap.set((s.name+'|'+(s.fatherName||'')+'|'+s.classId).toLowerCase(),s.id));
+  const seen=new Set(); let all=[],err=null,minM=null,maxM=null;
+  blocks.forEach(b=>{
+    if(!b.rows||b.rows.length<2) return;
+    const r=impParseBlock(b.rows,b.name,blocks.length>1,existingMap,seen);
+    if(r.err){ err=r.err; return; }
+    all=all.concat(r.items); if(r.minM!==null) minM=minM===null?r.minM:Math.min(minM,r.minM); if(r.maxM!==null) maxM=maxM===null?r.maxM:Math.max(maxM,r.maxM);
+  });
+  if(!all.length){ toast(err||'No data rows found. First row must be headings.','error'); return; }
+  if(err) toast(err+' — skipped','info');
+  const cm=new Date().getMonth();
+  _imp.opt.from=(minM!==null)?minM:cm; _imp.opt.to=(maxM!==null)?Math.min(maxM,cm):cm; _imp.opt.payMonth=cm;
+  _imp.items=all; impShowPreview();
+}
+function impBuild(rows){ impBuildBlocks([{rows}]); }
+
 function impStatus(it){
   const o=_imp.opt;
   if(!it.name) return {k:'err',t:'Missing name'};
   if(!it.cls) return {k:'err',t:'Missing class'};
   if(it.newCls&&!o.autoCls) return {k:'err',t:'Class not found'};
-  if(it.dup&&o.skipDup) return {k:'dup',t:'Duplicate'};
+  if(it.dup){ if(o.updFees&&it.existingId) return {k:'upd',t:'Update fees'}; if(o.skipDup) return {k:'dup',t:'Duplicate'}; }
   return {k:'ok',t:it.newCls?'OK (new class)':'OK'};
 }
 function impOpt(){
-  const o=_imp.opt;
-  o.autoCls=document.getElementById('io-cls').checked; o.skipDup=document.getElementById('io-dup').checked;
-  o.fees=document.getElementById('io-fees').checked; o.from=Number(document.getElementById('io-from').value);
-  o.defFee=Number(document.getElementById('io-deffee').value)||0; impShowPreview();
+  const o=_imp.opt, $=id=>document.getElementById(id);
+  o.autoCls=$('io-cls').checked; o.skipDup=$('io-dup').checked; o.updFees=$('io-upd').checked;
+  o.fees=$('io-fees').checked; o.from=Number($('io-from').value); o.defFee=Number($('io-deffee').value)||0;
+  if($('io-pm')) o.payMonth=Number($('io-pm').value);
+  impShowPreview();
 }
 function impShowPreview(){
   const o=_imp.opt, sts=_imp.items.map(impStatus);
-  const ok=sts.filter(s=>s.k==='ok').length, dup=sts.filter(s=>s.k==='dup').length, err=sts.filter(s=>s.k==='err').length;
-  const badge={ok:'badge-paid',dup:'badge-partial',err:'badge-unpaid'};
+  const cnt=k=>sts.filter(s=>s.k===k).length, ok=cnt('ok'), upd=cnt('upd'), dup=cnt('dup'), err=cnt('err');
+  let P=0,H=0,U=0,single=false; const months=new Set();
+  const evs=_imp.items.map((it,i)=>{
+    if(sts[i].k==='err'||sts[i].k==='dup') return [];
+    const e=impFeeEvents(it,impResolveFee(it),o);
+    e.forEach(x=>{ if(x.st==='paid')P++; else if(x.st==='partial')H++; else U++; months.add(x.m); });
+    if(it.feeStatus||it.paidAmt) single=true; return e;
+  });
+  const mlist=[...months].sort((a,b)=>a-b).map(m=>MONTHS_SHORT[m]).join(', ');
+  const badge={ok:'badge-paid',upd:'badge-active',dup:'badge-partial',err:'badge-unpaid'};
+  const rowFees=e=>{ if(!e.length) return '—'; const p=e.filter(x=>x.st==='paid').length,h=e.filter(x=>x.st==='partial').length,u=e.filter(x=>x.st==='unpaid').length; return [p?p+' paid':'',h?h+' part':'',u?u+' unpaid':''].filter(Boolean).join(' · '); };
   openModal(`
     <div class="modal-head"><h3>Review Import</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
-      <span class="badge badge-paid">${ok} ready</span><span class="badge badge-partial">${dup} duplicates</span><span class="badge badge-unpaid">${err} errors</span>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
+      <span class="badge badge-paid">${ok} new</span>${upd?`<span class="badge badge-active">${upd} existing · fees updated</span>`:''}<span class="badge badge-partial">${dup} duplicates</span><span class="badge badge-unpaid">${err} errors</span>
       <span class="text-muted" style="font-size:12px; align-self:center;">${_imp.items.length} rows found</span>
     </div>
-    <div class="table-wrap" style="max-height:230px; overflow-y:auto;"><table style="min-width:520px;">
-      <thead><tr><th>Row</th><th>Name</th><th>Class</th><th>Roll</th><th>Fee</th><th>Status</th></tr></thead>
-      <tbody>${_imp.items.slice(0,15).map((it,i)=>`<tr><td class="mono">${it.n}</td><td>${escapeHtml(it.name||'—')}</td><td>${escapeHtml(it.cls||'—')}</td><td class="mono">${escapeHtml(it.roll||'auto')}</td><td class="mono">${it.fee?fmtMoney(it.fee):'class default'}</td><td><span class="badge ${badge[sts[i].k]}">${sts[i].t}</span></td></tr>`).join('')}</tbody>
+    <div class="card" style="padding:12px; margin-bottom:12px; background:var(--input-bg);">
+      ${(P+H+U)?`<div style="font-size:13px;"><b>Fee status found</b> — ${mlist}<br><span class="mono" style="font-size:12px;"><span style="color:var(--success)">${P} paid</span> · <span style="color:var(--warning)">${H} partial</span> · <span style="color:var(--danger)">${U} unpaid</span></span></div>`
+      :`<div class="text-muted" style="font-size:12.5px;">No fee-status columns found. Add month columns (Jan, Feb, Mar …) with Paid / Unpaid / Partial or the amount paid to import fee status too.</div>`}
+    </div>
+    <div class="table-wrap" style="max-height:230px; overflow-y:auto;"><table style="min-width:620px;">
+      <thead><tr><th>Row</th><th>Name</th><th>Class</th><th>Roll</th><th>Fee</th><th>Fees found</th><th>Status</th></tr></thead>
+      <tbody>${_imp.items.slice(0,15).map((it,i)=>`<tr><td class="mono">${it.n}</td><td>${escapeHtml(it.name||'—')}</td><td>${escapeHtml(it.cls||'—')}</td><td class="mono">${escapeHtml(it.roll||'auto')}</td><td class="mono">${it.fee?fmtMoney(it.fee):'class default'}</td><td style="font-size:12px;">${rowFees(evs[i])}</td><td><span class="badge ${badge[sts[i].k]}">${sts[i].t}</span></td></tr>`).join('')}</tbody>
     </table></div>
     ${_imp.items.length>15?`<div class="text-muted" style="font-size:11.5px; margin-top:6px;">Showing first 15 of ${_imp.items.length} rows</div>`:''}
     <div class="grid2" style="margin-top:16px;">
       <label class="checkbox-row"><input type="checkbox" id="io-cls" ${o.autoCls?'checked':''} onchange="impOpt()" style="width:auto;"> Auto-create missing classes</label>
-      <label class="checkbox-row"><input type="checkbox" id="io-dup" ${o.skipDup?'checked':''} onchange="impOpt()" style="width:auto;"> Skip duplicate students</label>
-      <label class="checkbox-row"><input type="checkbox" id="io-fees" ${o.fees?'checked':''} onchange="impOpt()" style="width:auto;"> Create monthly fee records</label>
+      <label class="checkbox-row"><input type="checkbox" id="io-upd" ${o.updFees?'checked':''} onchange="impOpt()" style="width:auto;"> Update fee status of students already in the system</label>
+      <label class="checkbox-row"><input type="checkbox" id="io-dup" ${o.skipDup?'checked':''} onchange="impOpt()" style="width:auto;"> Skip other duplicates</label>
+      <label class="checkbox-row"><input type="checkbox" id="io-fees" ${o.fees?'checked':''} onchange="impOpt()" style="width:auto;"> Create unpaid fee records for blank months (up to the last month in your sheet)</label>
       <div class="field" style="margin:0;"><label>Fee records start from</label><select id="io-from" onchange="impOpt()">${MONTHS.map((m,i)=>`<option value="${i}" ${o.from===i?'selected':''}>${m}</option>`).join('')}</select></div>
       <div class="field" style="margin:0;"><label>Default fee for new classes</label><input type="number" id="io-deffee" value="${o.defFee}" onchange="impOpt()"></div>
+      ${single?`<div class="field" style="margin:0;"><label>“Fee Status / Paid Amount” column is for month</label><select id="io-pm" onchange="impOpt()">${MONTHS.map((m,i)=>`<option value="${i}" ${o.payMonth===i?'selected':''}>${m}</option>`).join('')}</select></div>`:''}
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="openImportWizard()">← Back</button>
-      <button class="btn btn-primary" ${ok?'':'disabled'} onclick="impRun()">Import ${ok} Students</button>
+      <button class="btn btn-primary" ${(ok+upd)?'':'disabled'} onclick="impRun()">Import ${ok} new${upd?' + update '+upd:''}</button>
     </div>`,true);
 }
 function impRun(){
   const o=_imp.opt; snapshotForUndo();
-  const now=new Date(), y=now.getFullYear(), cm=now.getMonth(); let added=0,skipped=0,errs=0,newCls=0;
+  const now=new Date(), y0=now.getFullYear(), cm=now.getMonth(), today=todayStr();
+  let added=0,updated=0,skipped=0,errs=0,newCls=0,nP=0,nH=0,nU=0;
   const rollNext={};
   const nextRoll=cid=>{ if(rollNext[cid]===undefined) rollNext[cid]=db.students.filter(s=>s.classId===cid).reduce((a,s)=>Math.max(a,parseInt(s.roll)||0),0); return ++rollNext[cid]; };
+  const feeIdx=new Map(); db.feeRecords.forEach(f=>feeIdx.set(f.studentId+'|'+f.year+'|'+f.month,f));
+  const getRec=(s,fee,y,m)=>{ const k=s.id+'|'+y+'|'+m; let r=feeIdx.get(k);
+    if(!r){ r={id:uid('FEE'),studentId:s.id,year:y,month:m,amount:fee,status:'unpaid',paidAmount:0,lateFee:0,discount:0,paymentDate:null,receiptNo:null,notes:''}; db.feeRecords.push(r); feeIdx.set(k,r); }
+    return r; };
+  const applyFees=(s,it,fee)=>{
+    if(o.fees) for(let m=Math.min(o.from,cm);m<=Math.min(o.to==null?cm:o.to,cm);m++) getRec(s,fee,y0,m);            // unpaid placeholders (never overwrite)
+    impFeeEvents(it,fee,o).forEach(ev=>{
+      const rec=getRec(s,fee,ev.y,ev.m);
+      if(ev.st==='unpaid'){ rec.status='unpaid'; rec.paidAmount=0; rec.paymentDate=null; nU++; return; }
+      rec.status=ev.st;
+      rec.paidAmount=ev.st==='paid'?(ev.amt||rec.amount):(ev.amt||Math.round(rec.amount/2));
+      let pd=it.payDate?impDate(it.payDate):(ev.y+'-'+pad(ev.m+1)+'-01'); if(pd>today) pd=today;
+      rec.paymentDate=pd; rec.paymentMethod=it.payMethod||rec.paymentMethod||'Cash';
+      rec.receiptNo=rec.receiptNo||it.receipt||('RC-'+Math.floor(10000+Math.random()*89999));
+      if(!rec.notes) rec.notes='Imported from sheet';
+      if(ev.st==='paid') nP++; else nH++;
+    });
+  };
   _imp.items.forEach(it=>{
-    const st=impStatus(it); if(st.k==='dup'){skipped++;return;} if(st.k==='err'){errs++;return;}
+    const st=impStatus(it);
+    if(st.k==='dup'){skipped++;return;} if(st.k==='err'){errs++;return;}
+    if(st.k==='upd'){ const s=db.students.find(x=>x.id===it.existingId); if(s){ applyFees(s,it,it.fee||s.monthlyFee); updated++; } return; }
     let c=db.classes.find(c=>c.name.toLowerCase()===it.cls.toLowerCase());
     if(!c){ c={id:uid('CLS'),name:it.cls,section:it.section,fee:it.fee||o.defFee,order:db.classes.length}; db.classes.push(c); newCls++; }
     const fee=it.fee||c.fee;
     const s={id:uid('STU'),name:it.name,fatherName:it.fatherName,motherName:it.motherName,classId:c.id,section:it.section,
       roll:it.roll||String(nextRoll(c.id)),monthlyFee:fee,admissionFee:5000,annualCharges:3000,discount:0,scholarship:0,
       phone:it.phone,guardianNumber:it.guardianNumber,cnic:it.cnic,address:it.address,admissionDate:it.admissionDate,photo:null,status:it.status,notes:''};
-    db.students.push(s); added++;
-    if(o.fees) for(let m=Math.min(o.from,cm);m<=cm;m++)
-      db.feeRecords.push({id:uid('FEE'),studentId:s.id,year:y,month:m,amount:fee,status:'unpaid',paidAmount:0,lateFee:0,discount:0,paymentDate:null,receiptNo:null,notes:''});
+    db.students.push(s); added++; applyFees(s,it,fee);
   });
-  logActivity(`Import Wizard: ${added} students added${newCls?`, ${newCls} new classes`:''}`);
-  pushNotification(`Bulk import finished: ${added} added, ${skipped} duplicates skipped, ${errs} errors.`, 'success');
-  saveDB(); closeModal(); toast(`Imported ${added} students`, 'success'); render();
+  logActivity(`Import Wizard: ${added} students added${updated?`, ${updated} updated`:''}${newCls?`, ${newCls} new classes`:''} — fees: ${nP} paid, ${nH} partial, ${nU} unpaid`);
+  pushNotification(`Bulk import finished: ${added} added, ${updated} updated, ${skipped} duplicates skipped, ${errs} errors. Fees imported: ${nP} paid, ${nH} partial, ${nU} unpaid.`, 'success');
+  saveDB(); closeModal(); toast(`Imported ${added} students · fees: ${nP} paid, ${nH} partial, ${nU} unpaid`, 'success'); render();
 }
 
 
