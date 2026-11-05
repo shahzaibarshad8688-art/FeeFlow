@@ -922,7 +922,7 @@ function toast(msg, type='info'){
   const icons = {success:'<path d="M20 6L9 17l-5-5"/>', error:'<path d="M18 6L6 18M6 6l12 12"/>', info:'<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>'};
   el.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${icons[type]||icons.info}</svg><span>${escapeHtml(msg)}</span>`;
   root.appendChild(el);
-  setTimeout(()=>{ el.style.animation='fadeIn .3s reverse'; setTimeout(()=>el.remove(), 280); }, 3200);
+  setTimeout(()=>{ el.style.animation='fadeIn .3s reverse'; setTimeout(()=>el.remove(), 280); }, Math.max(3200, String(msg).length*60));
 }
 function logActivity(text){
   db.activityLog.unshift({id:uid('LOG'), text, ts:Date.now()});
@@ -2288,7 +2288,55 @@ function renderAdminPanelHtml(){
     <h3 style="font-size:15px; font-weight:700; margin-bottom:4px;">Manage Users</h3>
     <div class="section-sub" style="margin-bottom:14px;">Reset passwords or remove accounts. Each user's dashboard and records stay fully separate from yours.</div>
     <div id="users-table-wrap"></div>
+  </div>
+  <div class="card slide-up" style="margin-top:18px;">
+    <h3 style="font-size:15px; font-weight:700; margin-bottom:4px;">Firestore Security Rules</h3>
+    <div class="section-sub" style="margin-bottom:12px;">If “Create Client Account” or “Manage Users” says <b>Missing or insufficient permissions</b>, the rules in your Firebase project are outdated. Click <b>Copy Rules</b>, then open Firebase Console → Firestore Database → <b>Rules</b>, select everything, paste, and press <b>Publish</b>. Wait 1 minute, then refresh this page.</div>
+    <button class="btn btn-ghost btn-sm" onclick="copyFirestoreRules()">Copy Rules</button>
   </div>`;
+}
+const FIRESTORE_RULES_TEXT = `rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isOwner()  { return signedIn() && request.auth.token.email == 'shahzaibarshad8688@gmail.com'; }
+    function hasDir()   { return exists(/databases/$(database)/documents/users_directory/$(request.auth.uid)); }
+    function myDir()    { return get(/databases/$(database)/documents/users_directory/$(request.auth.uid)).data; }
+    function isAdmin()  { return isOwner() || (signedIn() && hasDir() && myDir().role == 'admin'); }
+    function isApproved() { return isAdmin() || (signedIn() && hasDir() && myDir().get('approved', false) == true); }
+
+    // Who is allowed in. Nobody can approve or promote themselves; only the admin can.
+    match /users_directory/{uid} {
+      allow read:   if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if isAdmin() || (signedIn() && request.auth.uid == uid
+                        && request.resource.data.role == 'user'
+                        && request.resource.data.approved == false);
+      allow update: if isAdmin() || (signedIn() && request.auth.uid == uid
+                        && request.resource.data.role == resource.data.role
+                        && request.resource.data.get('approved', false) == resource.data.get('approved', false));
+      allow delete: if isAdmin();
+    }
+
+    // Each school's data: only that approved school (and the admin).
+    match /users/{uid} {
+      allow read, write: if (signedIn() && request.auth.uid == uid && isApproved()) || isAdmin();
+    }
+    match /users/{uid}/{document=**} {
+      allow read, write: if (signedIn() && request.auth.uid == uid && isApproved()) || isAdmin();
+    }
+
+    // Website branding: public to read (login page), only admin can change.
+    match /site/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}`;
+function copyFirestoreRules(){
+  const done=()=>toast('Rules copied — paste them in Firebase Console → Firestore → Rules, then Publish','success');
+  try{ navigator.clipboard.writeText(FIRESTORE_RULES_TEXT).then(done,()=>{ throw 0; }); }
+  catch(e){ const t=document.createElement('textarea'); t.value=FIRESTORE_RULES_TEXT; document.body.appendChild(t); t.select(); try{ document.execCommand('copy'); done(); }catch(_){ toast('Could not copy automatically','error'); } t.remove(); }
 }
 
 async function renderUsersTable(){
@@ -2297,7 +2345,7 @@ async function renderUsersTable(){
   wrap.innerHTML = '<div class="text-muted" style="font-size:12.5px; padding:10px 0;">Loading users…</div>';
   let users;
   try{ users = await fetchUsersDirectory(); }
-  catch(e){ console.error('Failed to load users directory', e); wrap.innerHTML = '<div class="text-muted" style="font-size:12.5px; padding:10px 0;">Could not load users.</div>'; return; }
+  catch(e){ console.error('Failed to load users directory', e); wrap.innerHTML = `<div style="padding:12px 14px; border-radius:12px; background:rgba(251,113,133,.12); border:1px solid rgba(251,113,133,.3); font-size:12.5px; line-height:1.6;"><b style="color:var(--danger);">Could not load users — Firestore rules need updating.</b><br>Scroll down to <b>Firestore Security Rules</b>, press <b>Copy Rules</b>, paste them in Firebase Console → Firestore Database → Rules, press <b>Publish</b>, wait 1 minute and refresh.<br><button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="copyFirestoreRules()">Copy Rules</button></div>`; return; }
 
   const countEl = document.getElementById('total-users-count');
   if(countEl) countEl.textContent = users.length;
@@ -2545,18 +2593,31 @@ async function adminCreateClient(){
   if(!isValidEmail(email)){ toast('Please enter a valid client email', 'error'); return; }
   if(!passwordStrengthOK(pass)){ toast('Password must be at least 6 characters', 'error'); return; }
   const btn = document.getElementById('cc-btn'); btn.disabled = true;
+  const a2 = window.fb.getSecondaryAuth();
   try{
-    const a2 = window.fb.getSecondaryAuth();
-    const cred = await fbCreateUserWithEmailAndPassword(a2, email, pass);
-    await fbSignOut(a2);
-    await fsSetDoc(fsdoc(dbFs, 'users_directory', cred.user.uid), { email, name, role:'user', approved:true, createdAt:Date.now() });
-    toast('Client account created — share the email & password with them', 'success');
+    let uid = null, linked = false;
+    try{
+      const cred = await fbCreateUserWithEmailAndPassword(a2, email, pass); uid = cred.user.uid;
+    }catch(err){
+      if(err.code !== 'auth/email-already-in-use') throw err;
+      // The login already exists (e.g. an earlier attempt was stopped by Firestore rules): link it using the password typed here.
+      try{ const cred = await fbSignInWithEmailAndPassword(a2, email, pass); uid = cred.user.uid; linked = true; }
+      catch(e2){ toast('This email already has a login with a different password. Ask the client to use “Forgot password” on the login page, then approve them from the Manage Users list.', 'error'); return; }
+    }
+    try{ await fbSignOut(a2); }catch(e){}
+    await fsSetDoc(fsdoc(dbFs, 'users_directory', uid), { email, name, role:'user', approved:true, createdAt:Date.now() }, { merge:true });
+    toast(linked ? 'Existing login linked and approved — share the email & password with the client' : 'Client account created — share the email & password with them', 'success');
     ['cc-email','cc-pass','cc-name'].forEach(id=>{ document.getElementById(id).value = ''; });
     renderUsersTable();
   }catch(err){
     console.error('Create client failed', err);
-    const map = { 'auth/email-already-in-use':'This email already has an account. Approve it from the list below.', 'auth/invalid-email':'Invalid email address', 'auth/weak-password':'Password must be at least 6 characters' };
-    toast(map[err.code] || ('Could not create account: ' + (err.message||err.code)), 'error');
+    try{ await fbSignOut(a2); }catch(e){}
+    if(err.code==='permission-denied' || /permission/i.test(err.message||'')){
+      toast('Firestore rules are outdated. Scroll down to “Firestore Security Rules”, press Copy Rules, paste them in Firebase Console → Firestore → Rules → Publish. Then press Create Client Account again — the login that was already made will be linked automatically.', 'error');
+    } else {
+      const map = { 'auth/invalid-email':'Invalid email address', 'auth/weak-password':'Password must be at least 6 characters', 'auth/operation-not-allowed':'Email/Password sign-in is not enabled in Firebase Authentication' };
+      toast(map[err.code] || ('Could not create account: ' + (err.message||err.code)), 'error');
+    }
   }finally{ btn.disabled = false; }
 }
 async function setUserApproval(uid, email, flag){
