@@ -738,17 +738,8 @@ function showNotifyPopup(opts){
   window.__pendingManualNotif = opts;
   const waBtn = cfg.showWhatsApp!==false ? `<button class="btn btn-ghost" onclick="sendNotifyChannel('whatsapp')">WhatsApp</button>` : '';
   const smsBtn = cfg.showSMS!==false ? `<button class="btn btn-ghost" onclick="sendNotifyChannel('sms')">SMS</button>` : '';
-  // A wa.me / sms: link can only pick the recipient; the message always goes
-  // from whichever WhatsApp/SIM is active on this device. So show the
-  // institute's own number (Settings → Institute Profile → Phone) as the
-  // intended sender and remind the admin to send from that number.
-  const instPhone = String((db.settings && db.settings.phone) || '').trim();
-  const senderNote = instPhone
-    ? `<div style="font-size:12.5px; margin-bottom:8px; padding:8px 10px; border:1px solid var(--warning); border-radius:8px;">From: <b>${escapeHtml(instPhone)}</b> (Institute)<br>⚠️ Send only from the WhatsApp / SIM registered on <b>${escapeHtml(instPhone)}</b>. WhatsApp or SMS will use whichever number is active on this device.</div>`
-    : `<div style="font-size:12.5px; margin-bottom:8px; padding:8px 10px; border:1px solid var(--warning); border-radius:8px;">⚠️ Institute phone number is not set. Add it in Settings → Institute Profile → Phone, then send from the WhatsApp / SIM on that number.</div>`;
   openModal(`
     <div class="modal-head"><h3>${escapeHtml(opts.title)}</h3><button class="close-x" onclick="closeModal()">✕</button></div>
-    ${senderNote}
     <div class="text-muted" style="font-size:12.5px; margin-bottom:8px;">To: <b>${escapeHtml(opts.phone||'No guardian number on file')}</b></div>
     <div class="field"><textarea readonly style="min-height:150px; width:100%; white-space:pre-wrap;">${escapeHtml(opts.message)}</textarea></div>
     <div class="modal-actions" style="flex-wrap:wrap;">
