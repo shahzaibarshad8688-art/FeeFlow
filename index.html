@@ -710,6 +710,51 @@ function smsLink(phone, msg){
   const sep = /iPhone|iPad|iPod/.test(navigator.userAgent) ? '&' : '?';
   return 'sms:+' + num + sep + 'body=' + encodeURIComponent(msg);
 }
+/* "Which WhatsApp?" chooser. If a device has two WhatsApps (normal +
+   Business on Android, or the PC app + WhatsApp Web on a computer) the
+   admin picks one and the parent's chat opens straight in that app with
+   the message already written. The message is sent from whatever number
+   is logged in to the chosen app. */
+function whatsappTargets(phone, msg){
+  const num = formatPakPhone(phone), text = encodeURIComponent(msg);
+  const ua = navigator.userAgent;
+  if(/Android/i.test(ua)){
+    const fallback = encodeURIComponent(waLink(phone, msg));
+    const intent = pkg => `intent://send/?phone=${num}&text=${text}#Intent;scheme=whatsapp;package=${pkg};S.browser_fallback_url=${fallback};end`;
+    return [
+      {label:'WhatsApp', url:intent('com.whatsapp')},
+      {label:'WhatsApp Business', url:intent('com.whatsapp.w4b')}
+    ];
+  }
+  if(/iPhone|iPad|iPod/i.test(ua)) return [{label:'WhatsApp', url:waLink(phone, msg)}];
+  return [
+    {label:'WhatsApp App (PC)', url:`whatsapp://send?phone=${num}&text=${text}`},
+    {label:'WhatsApp Web', url:`https://web.whatsapp.com/send?phone=${num}&text=${text}`}
+  ];
+}
+function openWhatsAppChooser(phone, msg, onOpen){
+  const targets = whatsappTargets(phone, msg);
+  window.__waChooser = {targets, onOpen};
+  if(targets.length===1){ pickWhatsApp(0); return; }
+  const instPhone = String((db.settings && db.settings.phone) || '').trim();
+  openModal(`
+    <div class="modal-head"><h3>Which WhatsApp do you want to send from?</h3><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="text-muted" style="font-size:12.5px; margin-bottom:12px;">To: <b>${escapeHtml(phone)}</b>${instPhone?`<br>Choose the WhatsApp logged in with the institute number <b>${escapeHtml(instPhone)}</b>.`:''}</div>
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      ${targets.map((t,i)=>`<button class="btn btn-ghost" onclick="pickWhatsApp(${i})">${escapeHtml(t.label)}</button>`).join('')}
+    </div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">Cancel</button></div>
+  `);
+}
+function pickWhatsApp(i){
+  const c = window.__waChooser; if(!c || !c.targets[i]) return;
+  const url = c.targets[i].url;
+  if(/^https?:/.test(url)) window.open(url, '_blank');
+  else window.location.href = url;
+  closeModal();
+  if(c.onOpen) c.onOpen();
+  window.__waChooser = null;
+}
 function notifMessage(event, ctx){
   const inst = (db && db.settings && db.settings.instituteName) || 'the institute';
   if(event==='admission'){
@@ -761,8 +806,11 @@ function showNotifyPopup(opts){
 function sendNotifyChannel(channel){
   const p = window.__pendingManualNotif; if(!p) return;
   if(!p.phone){ toast('No guardian number on file for this student', 'error'); return; }
-  if(channel==='whatsapp') window.open(waLink(p.phone, p.message), '_blank');
-  else window.location.href = smsLink(p.phone, p.message);
+  if(channel==='whatsapp'){
+    openWhatsAppChooser(p.phone, p.message, ()=>logParentNotification('whatsapp', p));
+    return;
+  }
+  window.location.href = smsLink(p.phone, p.message);
   logParentNotification(channel, p);
   closeModal();
 }
@@ -2040,7 +2088,7 @@ function printReceipt(recId){
 function whatsappReceipt(recId){
   const rec = db.feeRecords.find(f=>f.id===recId); const s = db.students.find(x=>x.id===rec.studentId);
   const msg = `Fee Receipt — ${db.settings.instituteName}\nStudent: ${s.name}\nMonth: ${MONTHS[rec.month]} ${rec.year}\nAmount Paid: ${fmtMoney(rec.paidAmount)}\nStatus: ${rec.status.toUpperCase()}\nReceipt No: ${rec.receiptNo||'—'}\nThank you!`;
-  window.open(waLink(s.guardianNumber||s.phone||'', msg), '_blank');
+  openWhatsAppChooser(s.guardianNumber||s.phone||'', msg);
 }
 
 /* ================================================================
